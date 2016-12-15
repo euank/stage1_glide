@@ -1,0 +1,5 @@
+FROM debian:jessie
+
+RUN mkdir -p /rkt/status/
+
+COPY ./target/release/stage1_glide /init

@@ -1,0 +1,15 @@
+[package]
+name = "stage1_glide"
+version = "0.1.0"
+authors = ["Euan Kemp <euank@euank.com>"]
+
+[dependencies]
+
+docopt = "*"
+# rustc_serialize is only needed for docopt
+rustc-serialize = "*"
+serde = "*"
+serde_derive = "*"
+serde_json = "*"
+log = "*"
+env_logger = "*"
