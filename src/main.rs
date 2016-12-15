@@ -55,12 +55,11 @@ struct InitArgs {
 
 fn init(args: Vec<String>) {
     let args: InitArgs = docopt::Docopt::new(INIT_STR)
-        .and_then(|d| d.argv(args).decode()).unwrap();
+        .and_then(|d| d.argv(args).decode())
+        .unwrap();
     println!("init called with args: {:?}", args);
 
-    for flag in vec![args.flag_mds_token,
-                     args.flag_private_users,
-                     args.flag_hostname] {
+    for flag in vec![args.flag_mds_token, args.flag_private_users, args.flag_hostname] {
         if !flag.is_empty() {
             panic!("unsupported flag specified");
         }
@@ -79,7 +78,8 @@ fn init(args: Vec<String>) {
     let manifest_file = std::fs::File::open("pod").unwrap();
     let manifest: PodManifest = serde_json::from_reader(manifest_file).unwrap();
 
-    println!("in an ideal world I would now run {:?}, but I'm giving up", manifest.apps[0].app.exec);
+    println!("in an ideal world I would now run {:?}, but I'm giving up",
+             manifest.apps[0].app.exec);
 }
 
 #[derive(Debug,Deserialize)]
@@ -95,10 +95,13 @@ struct RuntimeApp {
 #[derive(Debug,Deserialize)]
 struct App {
     exec: Vec<String>,
+    #[serde(default)]
     user: String,
+    #[serde(default)]
     group: String,
+    #[serde(default)]
     environment: Vec<NameValue>,
-    #[serde(rename = "workingDirectory")]
+    #[serde(rename = "workingDirectory", default)]
     working_directory: String,
 }
 
