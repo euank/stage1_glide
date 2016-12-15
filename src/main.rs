@@ -10,6 +10,10 @@ extern crate rustc_serialize;
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
+
+mod appc;
+
+use appc::PodManifest;
 use std::vec::Vec;
 
 fn main() {
@@ -80,33 +84,4 @@ fn init(args: Vec<String>) {
 
     println!("in an ideal world I would now run {:?}, but I'm giving up",
              manifest.apps[0].app.exec);
-}
-
-#[derive(Debug,Deserialize)]
-struct PodManifest {
-    apps: Vec<RuntimeApp>,
-}
-
-#[derive(Debug,Deserialize)]
-struct RuntimeApp {
-    app: App,
-}
-
-#[derive(Debug,Deserialize)]
-struct App {
-    exec: Vec<String>,
-    #[serde(default)]
-    user: String,
-    #[serde(default)]
-    group: String,
-    #[serde(default)]
-    environment: Vec<NameValue>,
-    #[serde(rename = "workingDirectory", default)]
-    working_directory: String,
-}
-
-#[derive(Debug,Deserialize)]
-struct NameValue {
-    name: String,
-    value: String,
 }
