@@ -73,7 +73,7 @@ fn init(args: Vec<String>) {
 
     {
         let mut logger = env_logger::LogBuilder::new();
-        if args.flag_debug || true {
+        if args.flag_debug {
             logger.filter(None, log::LogLevelFilter::Debug);
         }
         logger.init().err().map(|e| {
