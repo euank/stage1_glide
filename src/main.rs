@@ -92,11 +92,13 @@ fn init(args: Vec<String>) {
     };
     let ref app = app.app;
 
-    let mut execCmd = app.exec.clone();
-    let cmd = execCmd.pop();
+    let mut exec = app.exec.clone();
+    debug!("running cmd: {:?}", exec);
+    let args = exec.split_off(1);
     // TODO(euank): cmd must be normalized to be within the stage1
     // TODO(euank): environment variables, path, etc
-    let mut cmd = Command::new(cmd).args(execCmd);
+    let mut cmd = Command::new(exec.first().unwrap());
+    cmd.args(&args);
     let err = cmd.exec();
     println!("error executing entrypoint: {}", err);
 }
