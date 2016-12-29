@@ -15,6 +15,8 @@ mod appc;
 
 use appc::PodManifest;
 use std::vec::Vec;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 fn main() {
     // Split based on our arg0 so we can get away with only packaging one binary.
@@ -81,7 +83,16 @@ fn init(args: Vec<String>) {
 
     let manifest_file = std::fs::File::open("pod").unwrap();
     let manifest: PodManifest = serde_json::from_reader(manifest_file).unwrap();
+    let app = match manifest.apps.first() {
+        Some(app) => app,
+        None => {
+            println!("pod must have a single application");
+            return;
+        }
+    };
+    let ref app = app.app;
 
-    println!("in an ideal world I would now run {:?}, but I'm giving up",
-             manifest.apps[0].app.exec);
+    let mut cmd = Command::new(app.exec.first().unwrap());
+    let err = cmd.exec();
+    println!("error executing entrypoint: {}", err);
 }
