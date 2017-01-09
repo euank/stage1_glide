@@ -31,15 +31,15 @@ fn main() {
     match bin_name {
         "init" => {
             std::process::exit(init(args));
-        },
+        }
         "gc" => {
             // we don't create any mounts or crazyness, so gc for us is easy!
             std::process::exit(0);
-        },
+        }
         "enter" => {
             println!("enter not supported");
             std::process::exit(254);
-        },
+        }
 
         _ => panic!("called with invalid entrypoint '{}'", bin),
     };
@@ -126,9 +126,7 @@ fn init(args: Vec<String>) -> i32 {
         exec_cmd_path = exec_cmd_path.strip_prefix("/").unwrap();
     }
 
-    let my_pid = unsafe {
-        libc::getpid()
-    };
+    let my_pid = unsafe { libc::getpid() };
     let mut pid_file = match File::create("pid") {
         Ok(f) => f,
         Err(e) => {
@@ -140,8 +138,8 @@ fn init(args: Vec<String>) -> i32 {
         Err(e) => {
             println!("unable to write pid file: {}", e);
             return 254;
-        },
-        _ => {},
+        }
+        _ => {}
     };
 
 
