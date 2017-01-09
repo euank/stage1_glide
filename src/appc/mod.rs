@@ -6,6 +6,7 @@ pub struct PodManifest {
 
 #[derive(Debug,Deserialize)]
 pub struct RuntimeApp {
+    pub name: String,
     pub app: App,
 }
 
