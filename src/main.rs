@@ -31,6 +31,10 @@ fn main() {
         "init" => {
             std::process::exit(init(args));
         }
+        "gc" => {
+            // we don't create any mounts or crazyness, so gc for us is easy!
+            std::process::exit(0);
+        }
 
         _ => panic!("called with invalid entrypoint '{}'", bin),
     };

@@ -12,7 +12,7 @@ rm -f intermediate_docker.tar
 tmpdir=$(mktemp -d "./tmp_pkg_aci_XXXXX")
 tar -C "${tmpdir}" -xzf localhost-stage1_glide-latest.aci
 
-jq -r '.annotations |= [{"name": "coreos.com/rkt/stage1/run", "value": "/init"}]' "${tmpdir}/manifest" > "${tmpdir}/manifest.new"
+jq -r '.annotations |= [{"name": "coreos.com/rkt/stage1/run", "value": "/init"}, {"name": "coreos.com/rkt/stage1/gc", "value": "/gc"}]' "${tmpdir}/manifest" > "${tmpdir}/manifest.new"
 mv "${tmpdir}/manifest.new" "${tmpdir}/manifest"
 
 jq -r '.name |= "aci.euank.com/stage1_glide"' "${tmpdir}/manifest" > "${tmpdir}/manifest.new"
