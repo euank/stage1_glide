@@ -10,6 +10,7 @@ extern crate rustc_serialize;
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
+extern crate libc;
 
 mod appc;
 
@@ -18,6 +19,8 @@ use std::vec::Vec;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Write;
 
 fn main() {
     // Split based on our arg0 so we can get away with only packaging one binary.
@@ -118,6 +121,25 @@ fn init(args: Vec<String>) -> i32 {
     if exec_cmd_path.is_absolute() {
         exec_cmd_path = exec_cmd_path.strip_prefix("/").unwrap();
     }
+
+    let my_pid = unsafe {
+        libc::getpid()
+    };
+    let mut pid_file = match File::create("pid") {
+        Ok(f) => f,
+        Err(e) => {
+            println!("unable to create pid file: {}", e);
+            return 254;
+        }
+    };
+    match pid_file.write_all(my_pid.to_string().as_bytes()) {
+        Err(e) => {
+            println!("unable to write pid file: {}", e);
+            return 254;
+        },
+        _ => {},
+    };
+
 
     // TODO(euank): environment variables, path, etc
     debug!("my command is {:?} with args {:?} and root path {:?}",
