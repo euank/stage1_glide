@@ -103,9 +103,10 @@ fn init(args: Vec<String>) -> i32 {
 
     // Unwrap is safe due to length check above
     let runtime_app = manifest.apps.first().unwrap();
-    let ref app = runtime_app.app;
+    let pod_root = std::env::current_dir().unwrap();
+    let app = &runtime_app.app;
     let app_root = PathBuf::new()
-        .join(".")
+        .join(pod_root)
         .join("stage1")
         .join("rootfs")
         .join("opt")
@@ -142,8 +143,6 @@ fn init(args: Vec<String>) -> i32 {
         _ => {}
     };
 
-
-    // TODO(euank): environment variables, path, etc
     debug!("my command is {:?} with args {:?} and root path {:?}",
            exec_cmd_path,
            args,
@@ -151,7 +150,46 @@ fn init(args: Vec<String>) -> i32 {
     let mut cmd = Command::new(exec_cmd_path);
     cmd.args(&args);
     cmd.current_dir(app_root_path);
+    cmd.env_clear();
+    match std::env::var("TERM") {
+        Ok(val) => {
+            cmd.env("TERM", val);
+        }
+        _ => {}
+    };
+    // By default, set a sane path
+    cmd.env("PATH",
+            mangle_env(app_root_path,
+                       "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()));
+
+
+    for env_pair in &app.environment {
+        cmd.env(env_pair.name.clone(), env_pair.value.clone());
+    }
     let err = cmd.exec();
     println!("error executing entrypoint: {}", err);
     return 254;
+}
+
+// mangle_env will take a colon-separated string (such as a PATH environment variable) and prefix
+// each component with, well, prefix.
+fn mangle_env(prefix: &Path, s: String) -> String {
+    s.split(':')
+        .map(|part| {
+            let mut part_path = Path::new(part);
+            if part_path.is_absolute() {
+                part_path = part_path.strip_prefix("/").unwrap();
+                PathBuf::from(prefix).join(part_path).into_os_string().into_string().unwrap()
+            } else {
+                part.to_string()
+            }
+        })
+        .fold("".to_string(), |x, y| {
+            if x == "" {
+                // First time, skip the ':'
+                y
+            } else {
+                format!("{}:{}", x, y)
+            }
+        })
 }
