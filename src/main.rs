@@ -31,11 +31,15 @@ fn main() {
     match bin_name {
         "init" => {
             std::process::exit(init(args));
-        }
+        },
         "gc" => {
             // we don't create any mounts or crazyness, so gc for us is easy!
             std::process::exit(0);
-        }
+        },
+        "enter" => {
+            println!("enter not supported");
+            std::process::exit(254);
+        },
 
         _ => panic!("called with invalid entrypoint '{}'", bin),
     };

@@ -4,3 +4,4 @@ RUN mkdir -p /rkt/status/
 
 COPY ./target/release/stage1_glide /init
 RUN ln -s ./init ./gc
+RUN ln -s ./init ./enter
