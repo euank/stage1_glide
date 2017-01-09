@@ -24,8 +24,6 @@ fn main() {
     let bin = std::env::args().next().unwrap();
     let args = std::env::args().collect();
 
-    println!("{:?}", args);
-
     let bin_name = std::path::Path::new(&bin).file_name().unwrap().to_str().unwrap();
     match bin_name {
         "init" => {
