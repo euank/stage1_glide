@@ -75,7 +75,7 @@ fn init(args: Vec<String>) -> i32 {
     let args: InitArgs = docopt::Docopt::new(INIT_STR)
         .and_then(|d| d.argv(args).decode())
         .unwrap();
-    println!("init called with args: {:?}", args);
+    debug!("init called with args: {:?}", args);
 
     for flag in vec![args.flag_mds_token, args.flag_private_users, args.flag_hostname] {
         if !flag.is_empty() {
@@ -119,13 +119,32 @@ fn init(args: Vec<String>) -> i32 {
     debug!("running cmd: {:?}", exec);
     let args = exec.split_off(1);
     let default_exec_cmd = "sh".to_string();
-    let exec_cmd: &String = {
+    let exec_cmd = {
         exec.first().unwrap_or(&default_exec_cmd)
     };
-    let mut exec_cmd_path = Path::new(exec_cmd);
-    if exec_cmd_path.is_absolute() {
-        exec_cmd_path = exec_cmd_path.strip_prefix("/").unwrap();
-    }
+
+    let app_path = mangle_env(app_root_path,
+                              app.environment
+                                  .iter()
+                                  .find(|kv| kv.name == "PATH")
+                                  .map(|kv| kv.value.clone())
+                                  .unwrap_or("/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:\
+                                              /usr/local/bin"
+                                      .to_string()));
+
+    let exec_cmd_absolute_path =
+        match resolve_in_root_with_path(app_root_path, app_path.clone(), exec_cmd.clone()) {
+            Some(p) => p,
+            None => {
+                println!("entrypoint not found in PATH");
+                return 254;
+            }
+        };
+    let exec_cmd = if Path::new(&exec_cmd.clone()).is_absolute() {
+        path_in_root(app_root_path, exec_cmd.to_string())
+    } else {
+        exec_cmd.clone()
+    };
 
     let my_pid = unsafe { libc::getpid() };
     let mut pid_file = match File::create("pid") {
@@ -143,10 +162,14 @@ fn init(args: Vec<String>) -> i32 {
         _ => {}
     };
 
-    debug!("my command is {:?} with args {:?} and root path {:?}",
-           exec_cmd_path,
-           args,
-           app_root_path);
+    // So, because of the ld.so.cache we have to do fun things here.  If it's a dynamic library, we
+    // need to skip the cache or it won't start because of the LD_LIBRARY_PATH overriding.. Here we
+    // gooo!
+    let (exec_cmd_path, args) = ld_bust_args(app_root_path,
+                                             exec_cmd_absolute_path,
+                                             exec_cmd.clone(),
+                                             args);
+    let exec_cmd_path = Path::new(&exec_cmd_path);
     let mut cmd = Command::new(exec_cmd_path);
     cmd.args(&args);
     cmd.current_dir(app_root_path);
@@ -157,15 +180,29 @@ fn init(args: Vec<String>) -> i32 {
         }
         _ => {}
     };
-    // By default, set a sane path
-    cmd.env("PATH",
-            mangle_env(app_root_path,
-                       "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()));
+    // TODO: parse /etc/ld.so.conf to actually have a complete value here
+    let possible_ld_values = "/lib64:/lib/x86_64-linux-gnu:/lib:/lib32:/lib64:/usr/lib64:/usr/lib:\
+                              /usr/lib32:/usr/lib/x86_64-linux-gnu";
+    cmd.env("LD_LIBRARY_PATH",
+            mangle_env(app_root_path, possible_ld_values.to_string()));
 
 
+    let mangle_paths = vec!["LD_LIBRARY_PATH"];
     for env_pair in &app.environment {
-        cmd.env(env_pair.name.clone(), env_pair.value.clone());
+        let name = env_pair.name.clone();
+        let mut val = env_pair.value.clone();
+        if mangle_paths.iter().any(|k| k.to_string() == name) {
+            debug!("mangling {}", name);
+            val = mangle_env(app_root_path, val);
+        }
+        cmd.env(name, val);
     }
+    cmd.env("PATH", app_path);
+
+    debug!("my command is {:?} with args {:?} and root path {:?}",
+           exec_cmd_path,
+           args,
+           app_root_path);
     let err = cmd.exec();
     println!("error executing entrypoint: {}", err);
     return 254;
@@ -175,15 +212,7 @@ fn init(args: Vec<String>) -> i32 {
 // each component with, well, prefix.
 fn mangle_env(prefix: &Path, s: String) -> String {
     s.split(':')
-        .map(|part| {
-            let mut part_path = Path::new(part);
-            if part_path.is_absolute() {
-                part_path = part_path.strip_prefix("/").unwrap();
-                PathBuf::from(prefix).join(part_path).into_os_string().into_string().unwrap()
-            } else {
-                part.to_string()
-            }
-        })
+        .map(|part| path_in_root(prefix, part.to_string()))
         .fold("".to_string(), |x, y| {
             if x == "" {
                 // First time, skip the ':'
@@ -192,4 +221,79 @@ fn mangle_env(prefix: &Path, s: String) -> String {
                 format!("{}:{}", x, y)
             }
         })
+}
+
+fn ld_bust_args(app_root: &Path,
+                entrypoint_absolute_path: String,
+                entrypoint: String,
+                args: Vec<String>)
+                -> (String, Vec<String>) {
+    // TODO there's definitely a better way to do this
+    let ld_so_paths = vec!["/lib/ld-linux.so.2",
+                           "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+                           "/lib64/ld-linux-x86-64.so.2",
+                           "/lib32/ld-linux.so.2"];
+
+    let ld_so_path = ld_so_paths.iter()
+        .map(|el| path_in_root(app_root, el.to_string()))
+        .find(|el| Path::new(el).exists());
+
+    let ld_so_path = match ld_so_path {
+        None => {
+            debug!("could not find any ld-linux.so in rootfs");
+            return (entrypoint, args);
+        }
+        Some(path) => path,
+    };
+
+    debug!("checking {}", entrypoint_absolute_path.clone());
+    let mut ld_cmd = Command::new(ld_so_path.clone());
+    ld_cmd.arg("--verify");
+    ld_cmd.arg(entrypoint_absolute_path.clone());
+    match ld_cmd.output() {
+        Ok(s) => {
+            if s.status.success() {
+                // Mangle away!
+                debug!("ld.so mangling because verify told us we could");
+                let mut new_args = Vec::new();
+                new_args.push("--inhibit-cache".to_string());
+                new_args.push(entrypoint_absolute_path);
+                // TODO transform ep and args as references, not cloning
+                new_args.extend(args.iter().cloned());
+                (ld_so_path.to_string(), new_args)
+            } else {
+                debug!("ld.so verify told us not to mangle, hopefully static");
+                (entrypoint, args)
+            }
+        }
+        Err(e) => {
+            debug!("error running {}: {}", ld_so_path, e);
+            (entrypoint, args)
+        }
+    }
+}
+
+// TODO this should resolve symlinks correctly
+fn path_in_root(root: &Path, path: String) -> String {
+    let mut inroot_path = Path::new(&path);
+    if inroot_path.is_absolute() {
+        inroot_path = inroot_path.strip_prefix("/").unwrap();
+    }
+    PathBuf::from(root).join(inroot_path).into_os_string().into_string().unwrap()
+}
+
+fn resolve_in_root_with_path(root: &Path, path: String, cmd: String) -> Option<String> {
+    let cmd_copy = cmd.clone();
+    let p = Path::new(&cmd_copy);
+    if p.is_absolute() {
+        return Some(path_in_root(root, cmd));
+    };
+
+    let respath = path.split(':')
+        .map(|el| {
+            let pir = Path::new(el);
+            pir.join(cmd.clone())
+        })
+        .find(|el| el.exists());
+    respath.map(|el| el.into_os_string().into_string().unwrap())
 }
