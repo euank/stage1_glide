@@ -17,17 +17,20 @@ use appc::PodManifest;
 use std::vec::Vec;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // Split based on our arg0 so we can get away with only packaging one binary.
     let bin = std::env::args().next().unwrap();
-    let args = std::env::args().skip(1).collect();
+    let args = std::env::args().collect();
 
     println!("{:?}", args);
 
     let bin_name = std::path::Path::new(&bin).file_name().unwrap().to_str().unwrap();
     match bin_name {
-        "init" => init(args),
+        "init" => {
+            std::process::exit(init(args));
+        }
 
         _ => panic!("called with invalid entrypoint '{}'", bin),
     };
@@ -59,7 +62,7 @@ struct InitArgs {
 }
 
 
-fn init(args: Vec<String>) {
+fn init(args: Vec<String>) -> i32 {
     let args: InitArgs = docopt::Docopt::new(INIT_STR)
         .and_then(|d| d.argv(args).decode())
         .unwrap();
@@ -67,7 +70,8 @@ fn init(args: Vec<String>) {
 
     for flag in vec![args.flag_mds_token, args.flag_private_users, args.flag_hostname] {
         if !flag.is_empty() {
-            panic!("unsupported flag specified");
+            warn!("unsupported flag {} specified", flag);
+            return 254;
         }
     }
 
@@ -83,22 +87,45 @@ fn init(args: Vec<String>) {
 
     let manifest_file = std::fs::File::open("pod").unwrap();
     let manifest: PodManifest = serde_json::from_reader(manifest_file).unwrap();
-    let app = match manifest.apps.first() {
-        Some(app) => app,
-        None => {
-            println!("pod must have a single application");
-            return;
-        }
-    };
-    let ref app = app.app;
+    if manifest.apps.len() != 1 {
+        warn!("pod must have a single application");
+        return 254;
+    }
+
+    // Unwrap is safe due to length check above
+    let runtime_app = manifest.apps.first().unwrap();
+    let ref app = runtime_app.app;
+    let app_root = PathBuf::new()
+        .join(".")
+        .join("stage1")
+        .join("rootfs")
+        .join("opt")
+        .join("stage2")
+        .join(runtime_app.name.clone())
+        .join("rootfs");
+    let app_root_path = app_root.as_path();
 
     let mut exec = app.exec.clone();
     debug!("running cmd: {:?}", exec);
     let args = exec.split_off(1);
-    // TODO(euank): cmd must be normalized to be within the stage1
+    let default_exec_cmd = "sh".to_string();
+    let exec_cmd: &String = {
+        exec.first().unwrap_or(&default_exec_cmd)
+    };
+    let mut exec_cmd_path = Path::new(exec_cmd);
+    if exec_cmd_path.is_absolute() {
+        exec_cmd_path = exec_cmd_path.strip_prefix("/").unwrap();
+    }
+
     // TODO(euank): environment variables, path, etc
-    let mut cmd = Command::new(exec.first().unwrap());
+    debug!("my command is {:?} with args {:?} and root path {:?}",
+           exec_cmd_path,
+           args,
+           app_root_path);
+    let mut cmd = Command::new(exec_cmd_path);
     cmd.args(&args);
+    cmd.current_dir(app_root_path);
     let err = cmd.exec();
     println!("error executing entrypoint: {}", err);
+    return 254;
 }
