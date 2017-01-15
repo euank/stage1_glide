@@ -94,7 +94,13 @@ fn init(args: Vec<String>) -> i32 {
         });
     }
 
-    let manifest_file = std::fs::File::open("pod").unwrap();
+    let manifest_file = match std::fs::File::open("pod") {
+        Ok(file) => file,
+        Err(e) => {
+            println!("unable to open pod: {}", e);
+            return 254;
+        }
+    };
     let manifest: PodManifest = serde_json::from_reader(manifest_file).unwrap();
     if manifest.apps.len() != 1 {
         warn!("pod must have a single application");
