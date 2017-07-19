@@ -1,16 +1,16 @@
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct PodManifest {
     pub apps: Vec<RuntimeApp>,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct RuntimeApp {
     pub name: String,
     pub app: App,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct App {
     pub exec: Vec<String>,
     #[serde(default)]
@@ -23,7 +23,7 @@ pub struct App {
     pub working_directory: String,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct NameValue {
     pub name: String,
     pub value: String,

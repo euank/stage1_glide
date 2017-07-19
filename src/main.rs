@@ -3,41 +3,56 @@
 #[macro_use]
 extern crate log;
 extern crate env_logger;
-extern crate docopt;
-extern crate rustc_serialize;
-
 #[macro_use]
 extern crate serde_derive;
 extern crate serde;
 extern crate serde_json;
+
+extern crate docopt;
 extern crate libc;
+extern crate rustc_serialize;
+extern crate walkdir;
 
 mod appc;
 
-use appc::PodManifest;
-use std::vec::Vec;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
-use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::vec::Vec;
+
+use appc::PodManifest;
+use walkdir::WalkDir;
 
 fn main() {
     // Split based on our arg0 so we can get away with only packaging one binary.
     let bin = std::env::args().next().unwrap();
     let args = std::env::args().collect();
 
-    let bin_name = std::path::Path::new(&bin).file_name().unwrap().to_str().unwrap();
+    let bin_name = std::path::Path::new(&bin)
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
     match bin_name {
         "init" => {
-            std::process::exit(init(args));
+            match init(args) {
+                Ok(_) => {
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    println!("error: {}", e);
+                    std::process::exit(254);
+                }
+            }
         }
         "gc" => {
             // we don't create any mounts or crazyness, so gc for us is easy!
             std::process::exit(0);
         }
         "enter" => {
-            println!("enter not supported");
+            warn!("enter not supported");
             std::process::exit(254);
         }
 
@@ -58,7 +73,7 @@ Options:
     --hostname=<hostname>    don't specify me
 ";
 
-#[derive(RustcDecodable,Debug)]
+#[derive(RustcDecodable, Debug)]
 struct InitArgs {
     flag_debug: bool,
     flag_net: String,
@@ -71,16 +86,20 @@ struct InitArgs {
 }
 
 
-fn init(args: Vec<String>) -> i32 {
+fn init(args: Vec<String>) -> Result<(), String> {
     let args: InitArgs = docopt::Docopt::new(INIT_STR)
         .and_then(|d| d.argv(args).decode())
-        .unwrap();
+        .map_err(|e| format!("unable to decode arguments: {}", e))?;
     debug!("init called with args: {:?}", args);
 
-    for flag in vec![args.flag_mds_token, args.flag_private_users, args.flag_hostname] {
+    for flag in vec![
+        args.flag_mds_token,
+        args.flag_private_users,
+        args.flag_hostname,
+    ]
+    {
         if !flag.is_empty() {
-            warn!("unsupported flag {} specified", flag);
-            return 254;
+            return Err(format!("unsupported flag '{}' specified", flag));
         }
     }
 
@@ -94,32 +113,45 @@ fn init(args: Vec<String>) -> i32 {
         });
     }
 
-    let manifest_file = match std::fs::File::open("pod") {
-        Ok(file) => file,
-        Err(e) => {
-            println!("unable to open pod: {}", e);
-            return 254;
-        }
-    };
-    let manifest: PodManifest = serde_json::from_reader(manifest_file).unwrap();
-    if manifest.apps.len() != 1 {
-        warn!("pod must have a single application");
-        return 254;
-    }
+    let manifest_file = std::fs::File::open("pod").map_err(|e| {
+        format!("could not open pod manifest: {}", e)
+    })?;
 
-    // Unwrap is safe due to length check above
-    let runtime_app = manifest.apps.first().unwrap();
-    let pod_root = std::env::current_dir().unwrap();
+    let manifest: PodManifest = serde_json::from_reader(manifest_file).map_err(
+        |e| format!("{}", e),
+    )?;
+
+    let runtime_app = manifest.apps.first().ok_or(
+        "pod must have a single application",
+    )?;
+    let pod_root = std::env::current_dir().map_err(|e| {
+        format!("could not get working dir: {}", e)
+    })?;
+
+    let stage1_root = pod_root.join("stage1").join("rootfs");
+
+    let ldconfig_bin = PathBuf::from("ldconfig");
+    debug!("using ldconfig bin: {:?}", ldconfig_bin);
+
+    let patchelf_bin = stage1_root.join("bin").join("patchelf");
+
+    debug!("using patchelf bin: {:?}", patchelf_bin);
     let app = &runtime_app.app;
-    let app_root = PathBuf::new()
-        .join(pod_root)
-        .join("stage1")
-        .join("rootfs")
+    let app_root = stage1_root
         .join("opt")
         .join("stage2")
-        .join(runtime_app.name.clone())
+        .join(&runtime_app.name)
         .join("rootfs");
     let app_root_path = app_root.as_path();
+
+    debug!("mangling symlinks");
+    mangle_symlinks(app_root_path)?;
+    // Figure out the right RPATH based on any ld.conf files present in the rootfs
+    let ldpath_in_root = resolve_ldpath(app_root_path, &ldconfig_bin)?;
+
+    // Run patchelf on all the files in the rootfs using patchelf
+    debug!("mangling elf");
+    mangle_elfs(app_root_path, &ldpath_in_root, &patchelf_bin)?;
 
     let mut exec = app.exec.clone();
     debug!("running cmd: {:?}", exec);
@@ -129,96 +161,63 @@ fn init(args: Vec<String>) -> i32 {
         exec.first().unwrap_or(&default_exec_cmd)
     };
 
-    let app_path = mangle_env(app_root_path,
-                              app.environment
-                                  .iter()
-                                  .find(|kv| kv.name == "PATH")
-                                  .map(|kv| kv.value.clone())
-                                  .unwrap_or("/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:\
-                                              /usr/local/bin"
-                                      .to_string()));
+    let app_path = mangle_env(
+        app_root_path,
+        app.environment
+            .iter()
+            .find(|kv| kv.name == "PATH")
+            .map(|kv| kv.value.as_ref())
+            .unwrap_or(
+                "/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin",
+            ),
+    );
 
-    let exec_cmd_absolute_path =
-        match resolve_in_root_with_path(app_root_path, app_path.clone(), exec_cmd.clone()) {
-            Some(p) => p,
-            None => {
-                println!("entrypoint not found in PATH");
-                return 254;
-            }
-        };
-    let exec_cmd = if Path::new(&exec_cmd.clone()).is_absolute() {
-        path_in_root(app_root_path, exec_cmd.to_string())
-    } else {
-        exec_cmd.clone()
-    };
+    let exec_cmd_absolute_path = resolve_in_root_with_path(app_root_path, &app_path, &exec_cmd)
+        .ok_or("could not find entrypoint in PATH")?;
 
     let my_pid = unsafe { libc::getpid() };
-    let mut pid_file = match File::create("pid") {
-        Ok(f) => f,
-        Err(e) => {
-            println!("unable to create pid file: {}", e);
-            return 254;
-        }
-    };
-    match pid_file.write_all(my_pid.to_string().as_bytes()) {
-        Err(e) => {
-            println!("unable to write pid file: {}", e);
-            return 254;
-        }
-        _ => {}
-    };
+    let mut pid_file = File::create("pid").map_err(|e| {
+        format!("unable to create pid file: {}", e)
+    })?;
+    pid_file.write_all(my_pid.to_string().as_bytes()).map_err(
+        |e| {
+            format!("unable to write pid file: {}", e)
+        },
+    )?;
 
-    // So, because of the ld.so.cache we have to do fun things here.  If it's a dynamic library, we
-    // need to skip the cache or it won't start because of the LD_LIBRARY_PATH overriding.. Here we
-    // gooo!
-    let (exec_cmd_path, args) = ld_bust_args(app_root_path,
-                                             exec_cmd_absolute_path,
-                                             exec_cmd.clone(),
-                                             args);
-    let exec_cmd_path = Path::new(&exec_cmd_path);
+    let exec_cmd_path = Path::new(&exec_cmd_absolute_path);
     let mut cmd = Command::new(exec_cmd_path);
     cmd.args(&args);
     cmd.current_dir(app_root_path);
     cmd.env_clear();
-    match std::env::var("TERM") {
-        Ok(val) => {
-            cmd.env("TERM", val);
-        }
-        _ => {}
+    if let Ok(val) = std::env::var("TERM") {
+        cmd.env("TERM", val);
     };
-    // TODO: parse /etc/ld.so.conf to actually have a complete value here
-    let possible_ld_values = "/lib64:/lib/x86_64-linux-gnu:/lib:/lib32:/lib64:/usr/lib64:/usr/lib:\
-                              /usr/lib32:/usr/lib/x86_64-linux-gnu";
-    cmd.env("LD_LIBRARY_PATH",
-            mangle_env(app_root_path, possible_ld_values.to_string()));
 
-
-    let mangle_paths = vec!["LD_LIBRARY_PATH"];
     for env_pair in &app.environment {
-        let name = env_pair.name.clone();
-        let mut val = env_pair.value.clone();
-        if mangle_paths.iter().any(|k| k.to_string() == name) {
-            debug!("mangling {}", name);
-            val = mangle_env(app_root_path, val);
-        }
-        cmd.env(name, val);
+        cmd.env(&env_pair.name, &env_pair.value);
     }
     cmd.env("PATH", app_path);
 
-    debug!("my command is {:?} with args {:?} and root path {:?}",
-           exec_cmd_path,
-           args,
-           app_root_path);
+    debug!(
+        "my command is {:?} with args {:?} and root path {:?}",
+        exec_cmd_path,
+        args,
+        app_root_path
+    );
     let err = cmd.exec();
+    // code never reached on success; we've exec'd away
     println!("error executing entrypoint: {}", err);
-    return 254;
+    Ok(())
 }
 
 // mangle_env will take a colon-separated string (such as a PATH environment variable) and prefix
 // each component with, well, prefix.
-fn mangle_env(prefix: &Path, s: String) -> String {
+fn mangle_env(prefix: &Path, s: &str) -> String {
     s.split(':')
-        .map(|part| path_in_root(prefix, part.to_string()))
+        .map(|part| {
+            path_in_root(prefix, part).to_string_lossy().to_string()
+        })
         .fold("".to_string(), |x, y| {
             if x == "" {
                 // First time, skip the ':'
@@ -229,77 +228,200 @@ fn mangle_env(prefix: &Path, s: String) -> String {
         })
 }
 
-fn ld_bust_args(app_root: &Path,
-                entrypoint_absolute_path: String,
-                entrypoint: String,
-                args: Vec<String>)
-                -> (String, Vec<String>) {
-    // TODO there's definitely a better way to do this
-    let ld_so_paths = vec!["/lib/ld-linux.so.2",
-                           "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-                           "/lib64/ld-linux-x86-64.so.2",
-                           "/lib32/ld-linux.so.2"];
-
-    let ld_so_path = ld_so_paths.iter()
-        .map(|el| path_in_root(app_root, el.to_string()))
-        .find(|el| Path::new(el).exists());
-
-    let ld_so_path = match ld_so_path {
-        None => {
-            debug!("could not find any ld-linux.so in rootfs");
-            return (entrypoint, args);
-        }
-        Some(path) => path,
-    };
-
-    debug!("checking {}", entrypoint_absolute_path.clone());
-    let mut ld_cmd = Command::new(ld_so_path.clone());
-    ld_cmd.arg("--verify");
-    ld_cmd.arg(entrypoint_absolute_path.clone());
-    match ld_cmd.output() {
-        Ok(s) => {
-            if s.status.success() {
-                // Mangle away!
-                debug!("ld.so mangling because verify told us we could");
-                let mut new_args = Vec::new();
-                new_args.push("--inhibit-cache".to_string());
-                new_args.push(entrypoint_absolute_path);
-                // TODO transform ep and args as references, not cloning
-                new_args.extend(args.iter().cloned());
-                (ld_so_path.to_string(), new_args)
-            } else {
-                debug!("ld.so verify told us not to mangle, hopefully static");
-                (entrypoint, args)
+// mangle_symlinks re-points all the symlinks under a given rootfs to point to the correct location
+// within that rootfs.
+fn mangle_symlinks(rootfs: &Path) -> Result<(), String> {
+    for symlink in WalkDir::new(rootfs).into_iter().filter_map(|e| {
+        match e {
+            Ok(entry) => {
+                if entry.file_type().is_symlink() {
+                    //if entry.path_is_symbolic_link() {
+                    debug!(
+                        "is symlink: {:?}, {:?}, {}",
+                        entry.path(),
+                        entry.file_type(),
+                        entry.file_type().is_symlink()
+                    );
+                    Some(entry)
+                } else {
+                    None
+                }
             }
+            Err(_) => None,
         }
-        Err(e) => {
-            debug!("error running {}: {}", ld_so_path, e);
-            (entrypoint, args)
-        }
+    })
+    {
+        let link_contents = std::fs::read_link(symlink.path()).unwrap();
+        let new_target = if link_contents.is_absolute() {
+            path_in_root(rootfs, &link_contents.to_string_lossy())
+        } else {
+            link_contents
+        };
+        // Delete old symlink
+        std::fs::remove_file(symlink.path())
+            .map_err(|e| {
+                panic!("could not remove {:?}: {:?}", symlink.path(), e);
+            })
+            .unwrap();
+        std::os::unix::fs::symlink(new_target, symlink.path()).unwrap();
     }
+    Ok(())
 }
 
-// TODO this should resolve symlinks correctly
-fn path_in_root(root: &Path, path: String) -> String {
+fn mangle_elfs(rootfs: &Path, new_rpath: &str, patchelf_bin: &Path) -> Result<(), String> {
+    for elf in WalkDir::new(rootfs).into_iter().filter_map(|e| {
+        // filter for valid-enough elfs
+        match e {
+            Ok(path) => {
+                if !path.file_type().is_file() {
+                    return None;
+                }
+                // Note, checking if something is +x here is tempting, but distros ship `.so`s that
+                // aren't +x. Looking at you debian.
+                // Let's just trust ldd
+                let output = match Command::new("ldd")
+                    .arg(path.path().to_string_lossy().to_string())
+                    .output() {
+                    Err(_) => {
+                        return None;
+                    }
+                    Ok(output) => output,
+                };
+                if !output.status.success() {
+                    return None;
+                };
+                let maybe_static = String::from_utf8_lossy(&output.stdout);
+                let maybe_static = maybe_static.trim();
+                if maybe_static == "not a dynamic executable" ||
+                    maybe_static == "statically linked"
+                {
+                    None
+                } else {
+                    Some(path)
+                }
+            }
+            Err(_) => None,
+        }
+    })
+    {
+        // Now we loop through candidate elfs
+        let interp = match Command::new(patchelf_bin)
+            .arg("--print-interpreter")
+            .arg(elf.path())
+            .output() {
+            Err(e) => {
+                // probably not an elf
+                debug!(
+                    "unable to determine interpreter for: {:?}: {:?}",
+                    elf.path(),
+                    e
+                );
+                continue;
+            }
+            Ok(output) => output,
+        };
+
+        if !interp.status.success() {
+            debug!(
+                "not patching {:?} interp: exit status {}",
+                elf,
+                interp.status
+            );
+        } else {
+            let mut old_interp = String::from_utf8_lossy(&interp.stdout).to_string();
+            old_interp.pop(); // remove trailing newline
+            let new_interp = path_in_root(rootfs, &old_interp)
+                .to_string_lossy()
+                .to_string();
+
+            debug!("patching elf: {:?}", elf.path());
+            if !Command::new(patchelf_bin)
+                .arg("--set-interpreter")
+                .arg(new_interp)
+                .arg(elf.path())
+                .status()
+                .map_err(|e| format!("error running patchelf interp: {}", e))?
+                .success()
+            {
+                return Err(format!("unable to patchelf interp: {:?}", elf.path()));
+            };
+        }
+
+        // Even if we don't patch interp, we should patch rpath
+        if !Command::new(patchelf_bin)
+            .arg("--set-rpath")
+            .arg(new_rpath)
+            .arg(elf.path())
+            .status()
+            .map_err(|e| format!("error running patchelf rpath: {}", e))?
+            .success()
+        {
+            panic!("unable to patchelf rpath: {:?}", elf.path());
+        };
+    }
+
+    Ok(())
+
+}
+
+// path_in_root resolves the given path within the given rootfs
+// It does not do symlink resolution or validate that the given path exists
+fn path_in_root(root: &Path, path: &str) -> PathBuf {
     let mut inroot_path = Path::new(&path);
+
+
     if inroot_path.is_absolute() {
         inroot_path = inroot_path.strip_prefix("/").unwrap();
     }
-    PathBuf::from(root).join(inroot_path).into_os_string().into_string().unwrap()
+    PathBuf::from(root).join(inroot_path)
 }
 
-fn resolve_in_root_with_path(root: &Path, path: String, cmd: String) -> Option<String> {
+fn resolve_in_root_with_path<'a>(root: &'a Path, path: &str, cmd: &str) -> Option<PathBuf> {
     let cmd_copy = cmd.clone();
     let p = Path::new(&cmd_copy);
     if p.is_absolute() {
-        return Some(path_in_root(root, cmd));
+        return Some(path_in_root(root, &cmd));
     };
 
-    let respath = path.split(':')
+    path.split(':')
         .map(|el| {
             let pir = Path::new(el);
             pir.join(cmd.clone())
         })
-        .find(|el| el.exists());
-    respath.map(|el| el.into_os_string().into_string().unwrap())
+        .find(|el| el.exists())
+}
+
+// Parsing /etc/ld.so.conf is actually kinda tricky; it supports some globbing even.
+// The easiest solution I've got is to use ldconfig -r[oot] and point that at the rootfs in
+// question. ldconfig knows how to parse those files and has a sane known output.
+fn resolve_ldpath(root: &Path, ldconfig_bin: &Path) -> Result<String, String> {
+    let output = Command::new(ldconfig_bin)
+        .arg("-r") // root
+        .arg(root.to_string_lossy().to_string())
+        .arg("-N") // no-cache-build
+        .arg("-X") // no symlink update
+        .arg("-v") // verbose
+        .output()
+        .map_err(|e| format!("could not execute {:?}: {}", ldconfig_bin, e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "expected ldconfig success ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let mangled_ldpath = String::from_utf8_lossy(&output.stdout).lines().filter_map(|line| {
+        if line.starts_with(|c: char| c.is_whitespace()) {
+            // the ldconfig -v output format is a list of directories and files in them. The files
+            // are whitespace prefixed, so this should skip them
+            return None
+        } else {
+        // directories have a trailing ':'
+            Some(path_in_root(root, line.trim_right_matches(':')).to_string_lossy().to_string())
+        }
+    }).collect::<Vec<String>>().join(":");
+
+    Ok(mangled_ldpath)
 }
