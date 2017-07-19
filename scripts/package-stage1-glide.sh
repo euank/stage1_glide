@@ -2,24 +2,33 @@
 
 set -e
 
-# TODO, --no-cache is because docker wasn't picking up changes in
-# target/release/stage1_glide and I have no clue why
+NAME=${1:?aci name}
+FILE=${2:?output file}
+
+
 docker build --no-cache -t localhost/stage1_glide -f ./scripts/Dockerfile.aci .
-docker save localhost/stage1_glide > intermediate_docker.tar
+
+tmpdir=$(mktemp -d "./tmp_pkg_aci_XXXXX")
+
+trap "rm -rf ${tmpdir}" EXIT
+
+docker save localhost/stage1_glide > "${tmpdir}/intermediate_docker.tar"
+pushd "${tmpdir}"
+
 docker2aci intermediate_docker.tar
 rm -f intermediate_docker.tar
 
-tmpdir=$(mktemp -d "./tmp_pkg_aci_XXXXX")
-tar -C "${tmpdir}" -xzf stage1_glide-latest.aci
+tar xzf stage1_glide-latest.aci
+rm -f glide-latest.aci
 
-jq -r '.annotations |= [{"name": "coreos.com/rkt/stage1/run", "value": "/init"}, {"name": "coreos.com/rkt/stage1/gc", "value": "/gc"}, {"name": "coreos.com/rkt/stage1/enter", "value": "/enter"}]' "${tmpdir}/manifest" > "${tmpdir}/manifest.new"
-mv "${tmpdir}/manifest.new" "${tmpdir}/manifest"
+jq -r '.annotations |= [{"name": "coreos.com/rkt/stage1/run", "value": "/init"}, {"name": "coreos.com/rkt/stage1/gc", "value": "/gc"}, {"name": "coreos.com/rkt/stage1/enter", "value": "/enter"}]' manifest > manifest.new
+mv manifest.new manifest
 
-jq -r '.name |= "aci.euank.com/stage1_glide"' "${tmpdir}/manifest" > "${tmpdir}/manifest.new"
-mv "${tmpdir}/manifest.new" "${tmpdir}/manifest"
+jq -r ".name |= \"${NAME}\"" manifest > manifest.new
+mv manifest.new manifest
 
-rm -f localhost-stage1_glide-latest.aci
+popd
 
-tar -C "${tmpdir}" -c {manifest,rootfs} | gzip > stage1_glide.aci
+tar -C "${tmpdir}" -c {manifest,rootfs} | gzip > "${FILE}"
 
 rm -rf "${tmpdir}"

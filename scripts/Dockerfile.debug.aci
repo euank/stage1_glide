@@ -13,7 +13,7 @@ COPY --from=builder /bin/patchelf /bin/patchelf
 
 RUN mkdir -p /rkt/status/
 
-COPY ./target/release/stage1_glide /init
+COPY ./target/debug/stage1_glide /init
 
 RUN ln -s ./init ./gc
 RUN ln -s ./init ./enter
